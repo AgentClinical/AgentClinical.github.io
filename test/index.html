@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AgentClinical Voice Test</title>
+  <style>
+    body { font-family: monospace; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    button { padding: 10px 20px; font-size: 16px; margin: 5px; cursor: pointer; }
+    #status { padding: 10px; margin: 10px 0; background: #f0f0f0; }
+    #log { white-space: pre-wrap; font-size: 12px; max-height: 400px; overflow-y: auto;
+           background: #1a1a1a; color: #0f0; padding: 10px; margin-top: 10px; }
+    .connected { background: #d4edda !important; }
+    .error { background: #f8d7da !important; }
+  </style>
+</head>
+<body>
+  <h2>AgentClinical Voice Test</h2>
+  <p>Tests the full pipeline: Browser mic -> Cloudflare Gateway -> PersonaPlex -> Speaker</p>
+
+  <div>
+    <label>Gateway URL:</label><br>
+    <input id="url" size="60" value="wss://agentclinical-gateway.serge-the-dev.workers.dev/twilio-stream?session_token=generate-a-real-token-later">
+  </div>
+  <br>
+  <button id="startBtn" onclick="start()">Start Call</button>
+  <button id="stopBtn" onclick="stop()" disabled>Stop Call</button>
+
+  <div id="status">Idle</div>
+  <div id="log"></div>
+
+  <script>
+    let ws = null;
+    let audioCtx = null;
+    let mediaStream = null;
+    let processor = null;
+    let streamSid = 'test-' + Date.now();
+    let callSid = 'test-call-' + Date.now();
+
+    function log(msg) {
+      const el = document.getElementById('log');
+      const ts = new Date().toISOString().slice(11, 23);
+      el.textContent += `[${ts}] ${msg}\n`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function setStatus(text, cls) {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      el.className = cls || '';
+    }
+
+    // Linear PCM float32 -> mulaw 8-bit
+    function floatToMulaw(sample) {
+      const MULAW_BIAS = 33;
+      const MULAW_MAX = 0x1FFF;
+      const sign = sample < 0 ? 0x80 : 0;
+      if (sample < 0) sample = -sample;
+      sample = Math.min(sample * 32768, MULAW_MAX);
+      sample += MULAW_BIAS;
+      let exponent = 7;
+      for (let expMask = 0x1000; exponent > 0 && !(sample & expMask); exponent--, expMask >>= 1) {}
+      const mantissa = (sample >> (exponent + 3)) & 0x0F;
+      const mulaw = ~(sign | (exponent << 4) | mantissa) & 0xFF;
+      return mulaw;
+    }
+
+    // Downsample from input sample rate to 8kHz
+    function downsample(buffer, inputRate) {
+      const ratio = inputRate / 8000;
+      const len = Math.floor(buffer.length / ratio);
+      const out = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        out[i] = floatToMulaw(buffer[Math.floor(i * ratio)]);
+      }
+      return out;
+    }
+
+    function uint8ToBase64(bytes) {
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      return btoa(binary);
+    }
+
+    function base64ToUint8(b64) {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    // Mulaw 8-bit -> float32 PCM
+    function mulawToFloat(mulaw) {
+      const MULAW_BIAS = 33;
+      mulaw = ~mulaw & 0xFF;
+      const sign = mulaw & 0x80 ? -1 : 1;
+      const exponent = (mulaw >> 4) & 0x07;
+      const mantissa = mulaw & 0x0F;
+      const sample = sign * ((mantissa << (exponent + 3)) + MULAW_BIAS * (1 << exponent) - MULAW_BIAS);
+      return sample / 32768;
+    }
+
+    function playMulawAudio(b64) {
+      if (!audioCtx) return;
+      const bytes = base64ToUint8(b64);
+      const buffer = audioCtx.createBuffer(1, bytes.length, 8000);
+      const channel = buffer.getChannelData(0);
+      for (let i = 0; i < bytes.length; i++) {
+        channel[i] = mulawToFloat(bytes[i]);
+      }
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioCtx.destination);
+      source.start();
+    }
+
+    async function start() {
+      try {
+        setStatus('Connecting...', '');
+        document.getElementById('startBtn').disabled = true;
+
+        audioCtx = new AudioContext({ sampleRate: 48000 });
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        const url = document.getElementById('url').value;
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+          setStatus('Connected - sending start event', 'connected');
+          log('WebSocket connected');
+
+          // Send Twilio-style start event
+          ws.send(JSON.stringify({
+            event: 'start',
+            streamSid: streamSid,
+            start: { streamSid: streamSid, callSid: callSid }
+          }));
+          log('Sent start event (streamSid=' + streamSid + ')');
+
+          // Start capturing audio
+          startCapture();
+          document.getElementById('stopBtn').disabled = false;
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.event === 'media' && msg.media?.payload) {
+              log('Received audio_out (' + msg.media.payload.length + ' chars b64)');
+              playMulawAudio(msg.media.payload);
+            } else {
+              log('Received: ' + JSON.stringify(msg));
+            }
+          } catch (e) {
+            log('Received non-JSON: ' + event.data);
+          }
+        };
+
+        ws.onerror = (e) => {
+          log('WebSocket error');
+          setStatus('Error', 'error');
+        };
+
+        ws.onclose = (e) => {
+          log('WebSocket closed (code=' + e.code + ' reason=' + e.reason + ')');
+          setStatus('Disconnected', '');
+          cleanup();
+        };
+
+      } catch (err) {
+        log('Error: ' + err.message);
+        setStatus('Error: ' + err.message, 'error');
+        cleanup();
+      }
+    }
+
+    function startCapture() {
+      const source = audioCtx.createMediaStreamSource(mediaStream);
+      // 4096 samples at 48kHz = ~85ms chunks -> ~680 bytes mulaw at 8kHz
+      processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      let seq = 0;
+
+      processor.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const mulaw = downsample(input, audioCtx.sampleRate);
+        const b64 = uint8ToBase64(mulaw);
+
+        ws.send(JSON.stringify({
+          event: 'media',
+          streamSid: streamSid,
+          media: {
+            payload: b64,
+            timestamp: String(seq++ * 85)
+          }
+        }));
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+      setStatus('Live - speaking to PersonaPlex', 'connected');
+      log('Audio capture started (48kHz -> 8kHz mulaw)');
+    }
+
+    function stop() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ event: 'stop', streamSid: streamSid }));
+        log('Sent stop event');
+        ws.close();
+      }
+      cleanup();
+    }
+
+    function cleanup() {
+      if (processor) { processor.disconnect(); processor = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      if (audioCtx) { audioCtx.close(); audioCtx = null; }
+      ws = null;
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
+      setStatus('Idle', '');
+    }
+  </script>
+</body>
+</html>
