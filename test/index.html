@@ -18,7 +18,8 @@
 
   <div>
     <label>Microphone:</label><br>
-    <select id="micSelect" style="width:100%; padding:5px; font-family:monospace;"></select>
+    <select id="micSelect" style="width:90%; padding:5px; font-family:monospace;"></select>
+    <button onclick="loadMics()" style="padding:5px;">&#x21bb;</button>
   </div>
   <br>
   <div>
@@ -48,15 +49,20 @@
         tmp.getTracks().forEach(t => t.stop());
       } catch {}
       const devices = await navigator.mediaDevices.enumerateDevices();
+      const mics = devices.filter(d => d.kind === 'audioinput');
       const select = document.getElementById('micSelect');
+      const prev = select.value;
       select.innerHTML = '';
-      devices.filter(d => d.kind === 'audioinput').forEach((d, i) => {
+      mics.forEach((d, i) => {
         const opt = document.createElement('option');
         opt.value = d.deviceId;
         opt.textContent = d.label || ('Microphone ' + (i + 1));
         select.appendChild(opt);
       });
+      if (prev) select.value = prev;
+      log('Found ' + mics.length + ' microphone(s)');
     }
+    navigator.mediaDevices.addEventListener('devicechange', loadMics);
     loadMics();
 
     function log(msg) {
