@@ -128,8 +128,16 @@
       return sample / 32768;
     }
 
+    let playbackTime = 0;
+    let gainNode = null;
+
     function playMulawAudio(b64) {
       if (!audioCtx) return;
+      if (!gainNode) {
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = 3.0;
+        gainNode.connect(audioCtx.destination);
+      }
       const bytes = base64ToUint8(b64);
       const buffer = audioCtx.createBuffer(1, bytes.length, 8000);
       const channel = buffer.getChannelData(0);
@@ -138,8 +146,12 @@
       }
       const source = audioCtx.createBufferSource();
       source.buffer = buffer;
-      source.connect(audioCtx.destination);
-      source.start();
+      source.connect(gainNode);
+      // Schedule chunks back-to-back to avoid gaps
+      const now = audioCtx.currentTime;
+      if (playbackTime < now) playbackTime = now;
+      source.start(playbackTime);
+      playbackTime += buffer.duration;
     }
 
     async function start() {
@@ -247,6 +259,8 @@
       if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
       if (audioCtx) { audioCtx.close(); audioCtx = null; }
       ws = null;
+      gainNode = null;
+      playbackTime = 0;
       document.getElementById('startBtn').disabled = false;
       document.getElementById('stopBtn').disabled = true;
       setStatus('Idle', '');
