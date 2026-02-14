@@ -17,6 +17,11 @@
   <p>Tests the full pipeline: Browser mic -> Cloudflare Gateway -> PersonaPlex -> Speaker</p>
 
   <div>
+    <label>Microphone:</label><br>
+    <select id="micSelect" style="width:100%; padding:5px; font-family:monospace;"></select>
+  </div>
+  <br>
+  <div>
     <label>Gateway URL:</label><br>
     <input id="url" size="60" value="wss://agentclinical-gateway.serge-the-dev.workers.dev/twilio-stream?session_token=generate-a-real-token-later">
   </div>
@@ -34,6 +39,25 @@
     let processor = null;
     let streamSid = 'test-' + Date.now();
     let callSid = 'test-call-' + Date.now();
+
+    // Populate mic dropdown
+    async function loadMics() {
+      // Request permission first so labels are visible
+      try {
+        const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tmp.getTracks().forEach(t => t.stop());
+      } catch {}
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const select = document.getElementById('micSelect');
+      select.innerHTML = '';
+      devices.filter(d => d.kind === 'audioinput').forEach((d, i) => {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = d.label || ('Microphone ' + (i + 1));
+        select.appendChild(opt);
+      });
+    }
+    loadMics();
 
     function log(msg) {
       const el = document.getElementById('log');
@@ -118,7 +142,10 @@
         document.getElementById('startBtn').disabled = true;
 
         audioCtx = new AudioContext({ sampleRate: 48000 });
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const micId = document.getElementById('micSelect').value;
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: micId ? { deviceId: { exact: micId } } : true
+        });
 
         const url = document.getElementById('url').value;
         ws = new WebSocket(url);
